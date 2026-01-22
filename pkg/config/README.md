@@ -14,7 +14,7 @@ Parses CNI plugin configuration from stdin (JSON format) and validates security-
 ## Usage
 
 ```go
-import "github.com/azalio/bm.azalio.net/pkg/config"
+import "github.com/azalio/kubeCon-cni-wrapper/pkg/config"
 
 // In your CNI plugin's cmdAdd/cmdDel/cmdCheck handlers
 conf, err := config.ParseConfig(args.StdinData)

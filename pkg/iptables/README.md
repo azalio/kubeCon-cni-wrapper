@@ -16,7 +16,7 @@ This package provides safe, idempotent operations for managing iptables mangle/P
 ## Usage
 
 ```go
-import "github.com/azalio/bm.azalio.net/pkg/iptables"
+import "github.com/azalio/kubeCon-cni-wrapper/pkg/iptables"
 
 // Add fwmark rule for Tenant A pod
 err := iptables.AddMarkRule("10.200.1.5", "0x10")
@@ -33,21 +33,21 @@ if err != nil {
 
 ## Tenant Routing Mapping
 
-| Tenant | fwmark | Gateway | IP |
-|--------|--------|---------|-----|
-| Tenant A | 0x10 | router1 | 10.10.10.107 |
-| Tenant B | 0x20 | router2 | 10.10.10.154 |
+| Tenant | fwmark | Routing table | Example gateway IP |
+|--------|--------|--------------|--------------------|
+| Tenant A | 0x10 | 100 | 192.0.2.1 |
+| Tenant B | 0x20 | 200 | 198.51.100.1 |
 
-Routing tables are configured via `scripts/tenant-routing-setup.sh`:
+Routing tables can be configured via `scripts/tenant-routing-setup.sh` (example):
 
 ```bash
-# Tenant A (fwmark 0x10 → table 100 → router1)
+# Tenant A (fwmark 0x10 → table 100)
 ip rule add fwmark 0x10 table 100
-ip route add default via 10.10.10.107 table 100
+ip route add default via 192.0.2.1 table 100
 
-# Tenant B (fwmark 0x20 → table 200 → router2)
+# Tenant B (fwmark 0x20 → table 200)
 ip rule add fwmark 0x20 table 200
-ip route add default via 10.10.10.154 table 200
+ip route add default via 198.51.100.1 table 200
 ```
 
 ## Requirements
@@ -105,24 +105,13 @@ iptables -t mangle -A PREROUTING -s <podIP> -j MARK --set-mark <fwmark>
 iptables -t mangle -A PREROUTING -s 10.200.1.5 -j MARK --set-mark 0x10
 ```
 
-## Testing on KubeCon Demo Infrastructure
+## Integration Testing
 
-The integration tests can be run on the worker nodes:
+The integration tests require a Linux environment where iptables changes are allowed (root or `CAP_NET_ADMIN`).
+
+Run them on a disposable VM/node (recommended), because they manipulate real host iptables rules:
 
 ```bash
-# SSH to worker node
-ssh -J root@bm.azalio.net ubuntu@10.10.10.181
-
-# Install Go (if not present)
-wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
-export PATH=$PATH:/usr/local/go/bin
-
-# Clone repository
-git clone https://github.com/azalio/bm.azalio.net.git
-cd bm.azalio.net
-
-# Run integration tests
 sudo go test ./pkg/iptables/ -tags=integration -v
 ```
 
