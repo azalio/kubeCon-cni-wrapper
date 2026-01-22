@@ -2,8 +2,8 @@
 
 A CNI meta-plugin that enables tenant-aware egress routing in Kubernetes by reading pod annotations and setting host-level iptables fwmark rules.
 
-**Presented at:** KubeCon + CloudNativeCon India 2026
-**Talk:** "Network Decisions Before Datapath: CNI Chaining for External IPAM and Tenant Routing"
+**Context:** Supporting code for a KubeCon + CloudNativeCon India 2026 CFP submission
+**Talk title:** "Network Decisions Before Datapath: CNI Chaining for External IPAM and Tenant Routing"
 
 ## Architecture
 
@@ -39,28 +39,28 @@ A CNI meta-plugin that enables tenant-aware egress routing in Kubernetes by read
 
 ## The Problem
 
-Some network decisions must happen **before** CNI execution, not inside Kubernetes API:
+Some networking decisions need to happen at CNI execution time (during `ADD`), not later via reconciliation:
 
-1. **External IPAM**: When corporate IPAM or ISP delegation is the source of truth
-2. **Tenant-aware routing**: Different customers require different egress gateways
+1. External IPAM: when a separate system is the source of truth
+2. Tenant-aware egress routing: when different workloads need different gateways
 
-Standard approaches fail:
-- **Controllers**: Race with kubelet; reconcile after pod creation
-- **Webhooks**: Modify pod specs, but CNI ignores most of it
-- **Multus**: Parallel networks, not routing injection
+Common alternatives have drawbacks in this timing window:
+- Controllers apply changes after pod creation and can race kubelet
+- Admission webhooks can change pod specs, but most of that is not consumed by CNI
+- Multus focuses on additional interfaces, not changing routing for the primary one
 
 ## The Pattern
 
-CNI chaining allows injecting routing decisions during CNI execution — the **only** moment when this is possible without racing kubelet.
+CNI chaining provides a practical injection point during CNI execution.
 
 The wrapper:
-1. Receives CNI ADD request from kubelet
-2. Delegates to underlying CNI (ptp) to create veth pair
-3. Reads `tenant.routing/fwmark` annotation from pod (or namespace)
-4. Sets iptables MARK rule on host: `-t mangle -A PREROUTING -s <pod-ip> -j MARK --set-mark <fwmark>`
-5. Returns CNI result
+1. Receives a CNI `ADD` call from kubelet
+2. Delegates to an underlying CNI (e.g. `ptp`) to create the interface and get the pod IP
+3. Reads `tenant.routing/fwmark` from the pod (or namespace)
+4. Installs an iptables `MARK` rule on the host: `-t mangle -A PREROUTING -s <pod-ip> -j MARK --set-mark <fwmark>`
+5. Returns the delegated CNI result
 
-Pre-configured `ip rule` entries on each node route marked traffic to tenant-specific gateways.
+Policy routing (`ip rule`/tables) is configured separately on each node to steer marked traffic via tenant-specific gateways.
 
 ## Building
 
@@ -127,7 +127,7 @@ kubectl apply -f scripts/manifests/tenant-b-pod.yaml
 
 ## Demo
 
-See [bm.azalio.net](https://github.com/azalio/bm.azalio.net) for full demo infrastructure with Terraform + Proxmox.
+A full lab (Terraform/Ansible/Proxmox) exists in a separate repo; it is not included here. This repo focuses on the CNI wrapper implementation and reproducible local primitives/scripts.
 
 ## Configuration
 
@@ -148,23 +148,20 @@ Values chosen to avoid conflict with Cilium's fwmark range (0x200-0xf00).
 
 ## Trade-offs
 
-**You gain:**
-- Local control over routing decisions
+**Pros:**
 - Works with off-the-shelf CNI plugins
-- No fork or deep customization required
-- Fast iteration on routing logic
+- Keeps routing intent close to CNI execution
 
-**You pay:**
-- Ownership of ~200 lines of glue code
-- Debugging complexity (multiple plugin layers)
-- Plugin order sensitivity
-- On-call responsibility
+**Cons:**
+- Extra moving parts (multiple plugin layers)
+- Order sensitivity in plugin chains
+- Operational ownership (debugging, lifecycle)
 
 ## When NOT to use
 
 - High pod churn (iptables rule management overhead)
 - When standard CNI features are sufficient
-- If you can't name the person who owns this code
+- When there is no clear owner/on-call for this glue
 
 ## Author
 
