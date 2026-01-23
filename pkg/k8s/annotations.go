@@ -3,11 +3,16 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 )
+
+// K8sAPITimeout is the maximum time allowed for Kubernetes API calls
+// CNI operations are time-sensitive; prevents hanging if API is slow/unreachable
+const K8sAPITimeout = 5 * time.Second
 
 // ValidFwmarkValues defines the allowed fwmark values for tenant routing
 var ValidFwmarkValues = map[string]bool{
@@ -26,7 +31,8 @@ var ValidFwmarkValues = map[string]bool{
 //   - fwmark value ('0x10', '0x20', or '') on success
 //   - error if pod/namespace API calls fail or fwmark value is invalid
 func GetFwmark(clientset kubernetes.Interface, podName, podNamespace, annotationKey string) (string, error) {
-	ctx := context.TODO()
+	ctx, cancel := context.WithTimeout(context.Background(), K8sAPITimeout)
+	defer cancel()
 
 	// Fetch pod
 	pod, err := clientset.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})

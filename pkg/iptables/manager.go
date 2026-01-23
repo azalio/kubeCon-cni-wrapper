@@ -87,19 +87,10 @@ func AddMarkRule(podIP, fwmark string) error {
 		"--set-mark", fwmark,
 	}
 
-	// Check if rule already exists (idempotency)
-	exists, err := mgr.ipt.Exists(tableNameMangle, chainPrerouting, rulespec...)
-	if err != nil {
-		return fmt.Errorf("failed to check if rule exists for podIP %s: %w", podIP, err)
-	}
-
-	if exists {
-		// Rule already exists, success (idempotent behavior)
-		return nil
-	}
-
-	// Add the rule
-	if err := mgr.ipt.Append(tableNameMangle, chainPrerouting, rulespec...); err != nil {
+	// Use AppendUnique for atomic idempotent operation
+	// This avoids TOCTOU race between Exists() and Append() calls
+	// AppendUnique checks and appends atomically - succeeds if rule already exists
+	if err := mgr.ipt.AppendUnique(tableNameMangle, chainPrerouting, rulespec...); err != nil {
 		return fmt.Errorf("failed to add mark rule for podIP %s with fwmark %s: %w", podIP, fwmark, err)
 	}
 
@@ -188,19 +179,10 @@ func DeleteMarkRule(podIP, fwmark string) error {
 		"--set-mark", fwmark,
 	}
 
-	// Check if rule exists before attempting deletion
-	exists, err := mgr.ipt.Exists(tableNameMangle, chainPrerouting, rulespec...)
-	if err != nil {
-		return fmt.Errorf("failed to check if rule exists for podIP %s: %w", podIP, err)
-	}
-
-	if !exists {
-		// Rule doesn't exist, success (idempotent behavior)
-		return nil
-	}
-
-	// Delete the rule
-	if err := mgr.ipt.Delete(tableNameMangle, chainPrerouting, rulespec...); err != nil {
+	// Delete the rule directly without checking existence first
+	// This avoids TOCTOU race between Exists() and Delete() calls
+	// DeleteIfExists handles "rule not found" gracefully (idempotent behavior)
+	if err := mgr.ipt.DeleteIfExists(tableNameMangle, chainPrerouting, rulespec...); err != nil {
 		return fmt.Errorf("failed to delete mark rule for podIP %s with fwmark %s: %w", podIP, fwmark, err)
 	}
 

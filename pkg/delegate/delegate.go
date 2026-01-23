@@ -101,7 +101,7 @@ func DelegateAdd(delegateConfig json.RawMessage, networkName string, stdin []byt
 // Parameters:
 //   - delegateConfig: Raw JSON configuration for the delegate plugin
 //   - networkName: Name of the network (from parent config) - required by CNI spec
-//   - stdin: Original CNI stdin data
+//   - stdin: Original CNI stdin data (used to extract cniVersion and prevResult)
 //
 // Returns:
 //   - error: Non-nil if delegation fails (non-zero exit code or execution error)
@@ -122,7 +122,21 @@ func DelegateDel(delegateConfig json.RawMessage, networkName string, stdin []byt
 	// Inject network name into delegate config
 	delegateConf["name"] = networkName
 
-	// Re-marshal the config with injected name
+	// Parse original stdin to extract CNI fields needed by delegate
+	// DEL operations may need prevResult for proper cleanup
+	var stdinConf map[string]any
+	if err := json.Unmarshal(stdin, &stdinConf); err == nil {
+		// Inject cniVersion from original config (required by CNI spec)
+		if cniVersion, ok := stdinConf["cniVersion"].(string); ok && cniVersion != "" {
+			delegateConf["cniVersion"] = cniVersion
+		}
+		// Inject prevResult if present (needed for DEL cleanup)
+		if prevResult, ok := stdinConf["prevResult"]; ok && prevResult != nil {
+			delegateConf["prevResult"] = prevResult
+		}
+	}
+
+	// Re-marshal the config with injected fields
 	delegateConfigWithName, err := json.Marshal(delegateConf)
 	if err != nil {
 		return fmt.Errorf("failed to marshal delegate config: %w", err)
@@ -160,10 +174,12 @@ func DelegateDel(delegateConfig json.RawMessage, networkName string, stdin []byt
 // Parameters:
 //   - delegateConfig: Raw JSON configuration for the delegate plugin
 //   - networkName: Name of the network (from parent config) - required by CNI spec
-//   - stdin: Original CNI stdin data
+//   - stdin: Original CNI stdin data (used to extract cniVersion and prevResult)
 //
 // Returns:
 //   - error: Non-nil if check fails (configuration not as expected)
+//
+// Note: CHECK requires prevResult to be present per CNI spec
 func DelegateCheck(delegateConfig json.RawMessage, networkName string, stdin []byte) error {
 	// Parse delegate config to extract plugin type
 	var delegateConf map[string]any
@@ -179,7 +195,21 @@ func DelegateCheck(delegateConfig json.RawMessage, networkName string, stdin []b
 	// Inject network name into delegate config
 	delegateConf["name"] = networkName
 
-	// Re-marshal the config with injected name
+	// Parse original stdin to extract CNI fields needed by delegate
+	// CHECK operations REQUIRE prevResult per CNI spec
+	var stdinConf map[string]any
+	if err := json.Unmarshal(stdin, &stdinConf); err == nil {
+		// Inject cniVersion from original config (required by CNI spec)
+		if cniVersion, ok := stdinConf["cniVersion"].(string); ok && cniVersion != "" {
+			delegateConf["cniVersion"] = cniVersion
+		}
+		// Inject prevResult (required for CHECK per CNI spec)
+		if prevResult, ok := stdinConf["prevResult"]; ok && prevResult != nil {
+			delegateConf["prevResult"] = prevResult
+		}
+	}
+
+	// Re-marshal the config with injected fields
 	delegateConfigWithName, err := json.Marshal(delegateConf)
 	if err != nil {
 		return fmt.Errorf("failed to marshal delegate config: %w", err)
