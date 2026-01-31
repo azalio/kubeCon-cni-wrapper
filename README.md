@@ -1,98 +1,56 @@
-# CNI Wrapper for Tenant-Aware Routing
+# CNI Chaining for Tenant Routing
 
-A CNI meta-plugin that enables tenant-aware egress routing in Kubernetes by reading pod annotations and setting host-level iptables fwmark rules.
+Demo repository for KubeCon India 2026 talk: **"Network Decisions Before Datapath: CNI Chaining for External IPAM and Tenant Routing"**
 
-**Context:** Supporting code for a KubeCon + CloudNativeCon India 2026 CFP submission
-**Talk title:** "Network Decisions Before Datapath: CNI Chaining for External IPAM and Tenant Routing"
+## The problem: routing can't wait
 
-## Architecture
+Most Kubernetes network tutorials show controllers reconciling state after pods exist. That works for many things. But egress routing is not one of them.
 
-```
-    TENANT-AWARE ROUTING VIA CNI CHAINING
+If your tenants need strict egress boundaries — different gateways, different NAT pools, compliance zones — the routing must be in place *before* the first packet leaves. A controller that reconciles seconds later is too late. The pod already sent traffic through the default gateway, bypassing your tenant isolation.
 
-    Pod A (fwmark: 0x10)          Pod B (fwmark: 0x20)
-           │                             │
-           └──────────┬──────────────────┘
-                      ▼
-    ┌─────────────────────────────────────────┐
-    │         CNI WRAPPER                     │
-    │   • Reads annotation from K8s API       │
-    │   • Delegates to ptp plugin             │
-    │   • Sets iptables MARK rule on host     │
-    └─────────────────────────────────────────┘
-                      │
-         ┌────────────┴────────────┐
-         ▼                         ▼
-    iptables MARK 0x10       iptables MARK 0x20
-         │                         │
-         ▼                         ▼
-    ip rule → table 100      ip rule → table 200
-         │                         │
-         ▼                         ▼
-    ┌──────────┐             ┌──────────┐
-    │ Gateway A│             │ Gateway B│
-    └──────────┘             └──────────┘
+Admission webhooks can mutate pod specs, but CNI plugins don't read most of those fields. Multus adds extra interfaces, but doesn't change where the primary one routes traffic.
 
-    TIMING: Kubernetes stops here ──▶ Linux takes over
-                                CNI execution
-```
+CNI chaining fixes this. You insert a small wrapper that runs during `CNI ADD`, reads an annotation, and sets up the routing path before the container starts. By the time the first packet hits the interface, policy routing is already in place.
 
-## The Problem
+This pattern isn't new — Istio CNI and GKE Dataplane v2 use the same mechanism — but it's rarely explained as something you can build yourself for your own use cases.
 
-Some networking decisions need to happen at CNI execution time (during `ADD`), not later via reconciliation:
+## How it works
 
-1. External IPAM: when a separate system is the source of truth
-2. Tenant-aware egress routing: when different workloads need different gateways
+This meta-plugin doesn't replace your CNI. It wraps it:
 
-Common alternatives have drawbacks in this timing window:
-- Controllers apply changes after pod creation and can race kubelet
-- Admission webhooks can change pod specs, but most of that is not consumed by CNI
-- Multus focuses on additional interfaces, not changing routing for the primary one
+1. Calls your existing CNI (ptp, bridge, whatever) to create the interface and get an IP
+2. Reads `tenant.routing/fwmark` annotation from the pod (falls back to namespace)
+3. Adds an iptables MARK rule for that pod IP
+4. Returns the original CNI result unchanged — your CNI does what it always did
 
-## The Pattern
-
-CNI chaining provides a practical injection point during CNI execution.
-
-The wrapper:
-1. Receives a CNI `ADD` call from kubelet
-2. Delegates to an underlying CNI (e.g. `ptp`) to create the interface and get the pod IP
-3. Reads `tenant.routing/fwmark` from the pod (or namespace)
-4. Installs an iptables `MARK` rule on the host: `-t mangle -A PREROUTING -s <pod-ip> -j MARK --set-mark <fwmark>`
-5. Returns the delegated CNI result
-
-Policy routing (`ip rule`/tables) is configured separately on each node to steer marked traffic via tenant-specific gateways.
-
-## Building
+The MARK integrates with standard Linux policy routing. Different marks hit different routing tables, different gateways.
 
 ```bash
-# Build the CNI plugin
-go build -o bin/tenant-routing-wrapper ./cmd/tenant-routing-wrapper/
-
-# Run tests
-go test ./...
+Pod (fwmark 0x10) → iptables MARK 0x10 → table tenant-a → gateway A (10.10.10.151)
+Pod (fwmark 0x20) → iptables MARK 0x20 → table tenant-b → gateway B (10.10.10.174)
 ```
 
-## Deployment
+## Quick start
 
-### 1. Set up routing tables on each node
+Your CNI conflist must include `kubeconfig` pointing to a valid kubeconfig on the node (e.g. `/etc/kubernetes/kubelet.conf`). The wrapper needs API access to read pod annotations at `CNI ADD` time.
 
 ```bash
-# Run on each K8s node
+# Build static binary for Linux (cross-compile if building on macOS)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/tenant-routing-wrapper ./cmd/tenant-routing-wrapper/
+
+# Set up routing tables on the node (configure GATEWAY_A/GATEWAY_B env vars for your routers)
 sudo ./scripts/tenant-routing-setup.sh
+
+# Copy binary to CNI directory
+sudo cp bin/tenant-routing-wrapper /opt/cni/bin/
+
+# Create test pods
+kubectl apply -f scripts/manifests/
 ```
 
-This creates:
-- Routing tables `tenant-a` (100) and `tenant-b` (200)
-- IP rules: `fwmark 0x10 → table 100`, `fwmark 0x20 → table 200`
-- Default routes via tenant gateways
+Run `traceroute` from the pods — they take completely different paths to the internet despite being on the same node.
 
-### 2. Deploy CNI wrapper
-
-Copy `tenant-routing-wrapper` binary to `/opt/cni/bin/` on each node.
-
-### 3. Configure CNI chain
-
-Example `/etc/cni/net.d/10-tenant-routing.conflist`:
+## CNI config example
 
 ```json
 {
@@ -105,67 +63,40 @@ Example `/etc/cni/net.d/10-tenant-routing.conflist`:
       "annotationKey": "tenant.routing/fwmark",
       "delegate": {
         "type": "ptp",
-        "ipam": {
-          "type": "host-local",
-          "subnet": "10.200.0.0/16"
-        }
+        "ipam": { "type": "host-local", "subnet": "10.200.0.0/16" }
       }
-    },
-    {
-      "type": "cilium-cni"
     }
   ]
 }
 ```
 
-### 4. Deploy test pods
+`kubeconfig` is required — the wrapper needs API access to read pod annotations. Must be an absolute path.
 
-```bash
-kubectl apply -f scripts/manifests/tenant-a-pod.yaml
-kubectl apply -f scripts/manifests/tenant-b-pod.yaml
-```
+## What's NOT in this repo
 
-## Demo
-
-A full lab (Terraform/Ansible/Proxmox) exists in a separate repo; it is not included here. This repo focuses on the CNI wrapper implementation and reproducible local primitives/scripts.
-
-## Configuration
-
-### Pod annotation
-
-```yaml
-metadata:
-  annotations:
-    tenant.routing/fwmark: "0x10"  # or "0x20"
-```
-
-### Supported fwmark values
-
-- `0x10` — Tenant A (routes via Gateway A)
-- `0x20` — Tenant B (routes via Gateway B)
-
-Values chosen to avoid conflict with Cilium's fwmark range (0x200-0xf00).
+The lab environment with multiple routers, VMs, and policy routing topology lives in a separate repo. This one contains only the CNI plugin code that would run on a real cluster.
 
 ## Trade-offs
 
-**Pros:**
-- Works with off-the-shelf CNI plugins
-- Keeps routing intent close to CNI execution
+CNI chaining is powerful but it's another thing to debug. iptables rules don't always clean themselves up if a node crashes. Policy routing is unforgiving at scale.
 
-**Cons:**
-- Extra moving parts (multiple plugin layers)
-- Order sensitivity in plugin chains
-- Operational ownership (debugging, lifecycle)
+But if you need routing decisions made at pod birth — not seconds later — this is where you make them. Not in a controller. Not in a webhook. In the CNI chain.
 
-## When NOT to use
+## Code structure
 
-- High pod churn (iptables rule management overhead)
-- When standard CNI features are sufficient
-- When there is no clear owner/on-call for this glue
+```bash
+cmd/tenant-routing-wrapper/   # CNI entrypoint
+pkg/config/                   # CNI config parsing and validation
+pkg/delegate/                 # calls the underlying CNI
+pkg/iptables/                 # MARK rule management
+pkg/k8s/                      # annotation lookup (pod → namespace fallback)
+pkg/result/                   # pod IP extraction from CNI result (0.4.0 + 1.0.0)
+scripts/                      # node setup + test manifests
+```
 
 ## Author
 
-Mikhail Petrov (@azalio)
+Mikhail Petrov ([@azalio](https://github.com/azalio))
 
 ## License
 
